@@ -42,8 +42,8 @@ jobs:
         include:
           - name: full (default features)
             features: ""
-          - name: minimal (--no-default-features)
-            features: "--no-default-features"
+          - name: minimal (no local-whisper)
+            features: "--no-default-features --features tray,overlay"
     steps:
       - uses: actions/checkout@v4
 

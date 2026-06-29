@@ -55,7 +55,7 @@ Each tagged release publishes tarballs on [GitHub Releases](https://github.com/y
 ARCH=x86_64   # or aarch64
 curl -sSL -o whisrs.tar.gz https://github.com/y0sif/whisrs/releases/latest/download/whisrs-linux-${ARCH}.tar.gz
 
-# Or the minimal build (cloud backends only — no whisper.cpp):
+# Or the minimal build (cloud backends only — no whisper.cpp; keeps tray + overlay):
 # curl -sSL -o whisrs.tar.gz https://github.com/y0sif/whisrs/releases/latest/download/whisrs-linux-${ARCH}-minimal.tar.gz
 
 tar xzf whisrs.tar.gz
