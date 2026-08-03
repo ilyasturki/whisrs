@@ -303,30 +303,386 @@ fn new_keyboard(
     }
 }
 
-/// Known terminal emulator window classes (lowercase for matching).
+/// Whole-identifier terminal matches, lowercased. Covers both the bare X11
+/// WM_CLASS class form (`Alacritty`, `st-256color`) and the reverse-DNS
+/// Wayland app_id form (`org.gnome.Terminal`).
+///
+/// Matching is exact, never substring: an unanchored `contains` on `"st"`
+/// false-positived on `steam`, `Postman` and `systemsettings`, and command
+/// mode then wiped the whole GUI text field with Ctrl+A/Ctrl+K (#70).
+///
+/// Provenance notes for the entries we could not capture at runtime:
+/// - `waveterm`, `tabby` — source-derived only, no runtime capture.
+/// - `dev.warp.warp` — unverified, from secondary sources only.
+/// - `org.xfce.terminal`, `org.contourterminal.contour` — speculative and
+///   defensive; the strings we did verify are `xfce4-terminal` and `contour`.
+/// - st sets its class from `opt_class ? opt_class : termname`, and shipped
+///   `config.def.h` sets `termname = "st-256color"` — so vanilla st reports
+///   `st-256color`, and bare `st` needs a patch or `-c st`. The enumerated
+///   `st-*` entries cover the common termnames (`st-mono` is defensive; it is
+///   absent from local ncurses terminfo). A build with a custom `termname` or
+///   `-c` class will not match and needs a user-level override.
 const TERMINAL_CLASSES: &[&str] = &[
     "alacritty",
-    "kitty",
+    "blackbox-terminal",
+    "contour",
+    "cool-retro-term",
+    "deepin-terminal",
     "foot",
-    "wezterm",
+    "footclient",
+    "ghostty",
+    "ghostty-debug",
     "gnome-terminal",
-    "konsole",
-    "xterm",
-    "urxvt",
-    "terminator",
-    "tilix",
-    "st",
-    "xfce4-terminal",
-    "sakura",
+    "gnome-terminal-server",
     "guake",
-    "yakuake",
+    // `hyper` is a generic word; safe only because matching is whole-string.
+    "hyper",
+    "kgx",
+    "kitty",
+    "koi8rxterm",
+    "konsole",
+    "lxterminal",
+    "mate-terminal",
+    "mlterm",
+    "ptyxis",
+    "qterminal",
+    "rio",
+    "roxterm",
+    "rxvt",
+    "rxvt-unicode",
+    "sakura",
+    "st",
+    "st-16color",
+    "st-256color",
+    "st-direct",
+    "st-mono",
+    "tabby",
+    "terminator",
+    "terminology",
     "termite",
+    "tilix",
+    "urxvt",
+    "urxvtc",
+    "uxterm",
+    "waveterm",
+    "wezterm",
+    "xfce4-terminal",
+    "xterm",
+    "yakuake",
+    // reverse-DNS app_ids
+    "com.gexperts.tilix",
+    "com.mitchellh.ghostty",
+    "com.mitchellh.ghostty-debug",
+    "com.raggesilver.blackbox",
+    "dev.warp.warp",
+    // full entry, not a leaf: `terminal` is an excluded generic leaf
+    "io.elementary.terminal",
+    "org.contourterminal.contour",
+    "org.gnome.console",
+    "org.gnome.console.devel",
+    "org.gnome.ptyxis",
+    "org.gnome.terminal",
+    "org.kde.konsole",
+    "org.kde.yakuake",
+    "org.wezfurlong.wezterm",
+    "org.xfce.terminal",
+];
+
+/// Distinctive leaf names, matched after stripping a reverse-DNS prefix, so
+/// repackaged/forked app_ids (e.g. `io.example.Ghostty`) still resolve.
+///
+/// Deliberately EXCLUDES generic leaves — `terminal`, `console`, `warp`,
+/// `wave`, `rio`, `st`, `foot`, `tabby`, `blackbox`, `contour`. The exclusion
+/// applies only to the dotted/leaf form; several of these still match as whole
+/// identifiers at stage 1 (`st`, `foot`, `rio`, `tabby`, `contour`). One
+/// collision is demonstrated: `app.drey.Warp` (leaf `warp`) is GNOME's Magic
+/// Wormhole client, not Warp Terminal. The rest are precautionary, not against
+/// a known clash: they are generic enough that any vendor could ship a
+/// non-terminal whose app_id ends in `.Contour`, `.BlackBox`, `.Terminal` or
+/// `.Console` — a payment terminal, a serial console, a web console.
+const TERMINAL_LEAF_CLASSES: &[&str] = &[
+    "alacritty",
     "cool-retro-term",
     "ghostty",
+    "ghostty-debug",
+    "guake",
+    "kitty",
+    "konsole",
+    "ptyxis",
+    "qterminal",
+    "tilix",
+    "waveterm",
+    "wezterm",
+    "yakuake",
 ];
 
 /// Check if a window class corresponds to a terminal emulator.
+///
+/// A false positive here is destructive (command mode clears the line), while a
+/// false negative merely degrades to plain injection — so both stages match on
+/// whole identifiers or whole dot-segments, never on substrings.
 pub(crate) fn is_terminal_class(class: &str) -> bool {
-    let lower = class.to_lowercase();
-    TERMINAL_CLASSES.iter().any(|t| lower.contains(t))
+    let lower = class.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    // Stage 1: whole-identifier exact match.
+    if TERMINAL_CLASSES.contains(&lower.as_str()) {
+        return true;
+    }
+    // Stage 2: exact match on the last dot-segment, so repackaged reverse-DNS
+    // app_ids still resolve. Only applies to dotted identifiers; a bare class
+    // must appear in TERMINAL_CLASSES verbatim.
+    if let Some((_, leaf)) = lower.rsplit_once('.') {
+        if TERMINAL_LEAF_CLASSES.contains(&leaf) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real-world strings, in the casing a compositor hands them to us: bare
+    /// X11 WM_CLASS classes and reverse-DNS Wayland app_ids.
+    #[test]
+    fn terminal_classes_match() {
+        for class in [
+            "st",
+            "st-256color",
+            "st-direct",
+            "gnome-terminal",
+            "gnome-terminal-server",
+            "org.gnome.Terminal",
+            "org.gnome.Console",
+            "org.gnome.Console.Devel",
+            "kgx",
+            "footclient",
+            "foot",
+            "konsole",
+            "org.kde.konsole",
+            "org.kde.yakuake",
+            "org.wezfurlong.wezterm",
+            "org.xfce.terminal",
+            "org.contourterminal.contour",
+            "com.mitchellh.ghostty",
+            "com.mitchellh.ghostty-debug",
+            "com.raggesilver.blackbox",
+            "dev.warp.warp",
+            "ghostty",
+            "blackbox-terminal",
+            "contour",
+            "guake",
+            "kitty",
+            "rio",
+            "rxvt",
+            "sakura",
+            "tabby",
+            "termite",
+            "tilix",
+            "urxvtc",
+            "waveterm",
+            "wezterm",
+            "xterm",
+            "yakuake",
+            "qterminal",
+            "Alacritty",
+            "cool-retro-term",
+            "xfce4-terminal",
+            "urxvt",
+            "rxvt-unicode",
+            "URxvt",
+            "io.example.Ghostty",
+            "Terminator",
+            "Com.gexperts.Tilix",
+            // added after the #70 review
+            "uxterm",
+            "koi8rxterm",
+            "lxterminal",
+            "roxterm",
+            "ptyxis",
+            "org.gnome.Ptyxis",
+            "mate-terminal",
+            "deepin-terminal",
+            "io.elementary.terminal",
+            "terminology",
+            "mlterm",
+            "hyper",
+        ] {
+            assert!(
+                is_terminal_class(class),
+                "{class} is a terminal but is_terminal_class says it is not"
+            );
+        }
+    }
+
+    /// No entry may rot into dead weight: stage 1 must match every one of its
+    /// own strings.
+    #[test]
+    fn every_terminal_class_entry_matches() {
+        for class in TERMINAL_CLASSES {
+            assert!(
+                is_terminal_class(class),
+                "{class} is in TERMINAL_CLASSES but is_terminal_class says it is not a terminal"
+            );
+        }
+    }
+
+    /// Same for stage 2, exercised through a reverse-DNS prefix.
+    #[test]
+    fn every_terminal_leaf_class_entry_matches() {
+        for leaf in TERMINAL_LEAF_CLASSES {
+            let class = format!("io.example.{leaf}");
+            assert!(
+                is_terminal_class(&class),
+                "{class} should match via TERMINAL_LEAF_CLASSES but does not"
+            );
+            // Stage 2 only fires on dotted identifiers, so the bare class form
+            // is matched solely by TERMINAL_CLASSES. A leaf-only entry would
+            // leave bare `{leaf}` unmatched — a silent false negative.
+            assert!(
+                TERMINAL_CLASSES.contains(leaf),
+                "{leaf} is in TERMINAL_LEAF_CLASSES but not TERMINAL_CLASSES, so the bare class form `{leaf}` would not match"
+            );
+        }
+    }
+
+    /// The generics the leaf set deliberately omits. Adding any of these to
+    /// `TERMINAL_LEAF_CLASSES` is the most destructive edit possible here, so
+    /// pin every one of them false.
+    #[test]
+    fn excluded_generic_leaves_do_not_match() {
+        for class in [
+            "io.example.Terminal",
+            "com.foo.Console",
+            "x.y.st",
+            "a.b.foot",
+            "x.y.tabby",
+            "a.b.rio",
+            "com.mapbox.contour",
+            "com.example.BlackBox",
+            "app.drey.Warp",
+            "com.example.Wave",
+        ] {
+            assert!(
+                !is_terminal_class(class),
+                "{class} is not a terminal but is_terminal_class says it is"
+            );
+        }
+    }
+
+    /// The `<base>-<suffix>` rule is enumerated, not open-ended: only the st
+    /// `termname` values we list and the ghostty debug build match.
+    #[test]
+    fn hyphen_suffixes_are_enumerated_not_open_ended() {
+        for class in [
+            "st-link",
+            "st-lite",
+            "st-jerry",
+            "st-",
+            "st--",
+            "ghostty-foo",
+        ] {
+            assert!(
+                !is_terminal_class(class),
+                "{class} is not a known terminal class but is_terminal_class says it is"
+            );
+        }
+        for class in [
+            "st-256color",
+            "st-direct",
+            "st-16color",
+            "st-mono",
+            "ghostty-debug",
+            "com.mitchellh.ghostty-debug",
+        ] {
+            assert!(
+                is_terminal_class(class),
+                "{class} is a terminal but is_terminal_class says it is not"
+            );
+        }
+    }
+
+    /// Stage 2 needs an actual dot, so the leaf set is not a second bare-string
+    /// list: only `blackbox-terminal` is a real class, plain `blackbox` is not.
+    #[test]
+    fn leaf_set_requires_a_dot() {
+        assert!(!is_terminal_class("blackbox"));
+        assert!(is_terminal_class("blackbox-terminal"));
+        assert!(is_terminal_class("io.example.Ghostty"));
+    }
+
+    /// The destructive direction: anything matched here gets Ctrl+A/Ctrl+K sent
+    /// into it by command mode, which empties a GUI text field.
+    #[test]
+    fn non_terminal_classes_do_not_match() {
+        for class in [
+            "steam",
+            "Steam",
+            "Postman",
+            "systemsettings",
+            "gnome-system-monitor",
+            "com.obsproject.Studio",
+            "libreoffice-startcenter",
+            "org.gnome.Settings",
+            "obsidian",
+            "code",
+            "firefox",
+            "Gnome-terminal-preferences",
+            "org.gnome.Terminal.Preferences",
+            "jconsole",
+            "foot-server",
+            "kitty-open",
+            "assistant",
+            "linguist",
+            "lstopo",
+            "xfce4-terminal-emulator",
+            "Stremio",
+            "standardnotes",
+            "",
+            "   ",
+        ] {
+            assert!(
+                !is_terminal_class(class),
+                "{class:?} is not a terminal but is_terminal_class says it is"
+            );
+        }
+    }
+
+    /// Issue #70, first half: the old `lower.contains("st")` matched these.
+    #[test]
+    fn repro_st_substring_matches_non_terminals_issue70() {
+        for class in [
+            "steam",
+            "com.obsproject.Studio",
+            "systemsettings",
+            "Postman",
+            "libreoffice-startcenter",
+        ] {
+            assert!(
+                !is_terminal_class(class),
+                "{class} is not a terminal but is_terminal_class says it is"
+            );
+        }
+    }
+
+    /// Issue #70, second half: the old list held only bare X11 classes, so
+    /// every reverse-DNS Wayland app_id was missed.
+    #[test]
+    fn repro_wayland_gnome_terminal_is_missed_issue70() {
+        for class in [
+            "org.gnome.Terminal",
+            "org.gnome.Console",
+            "kgx",
+            "rio",
+            "qterminal",
+        ] {
+            assert!(
+                is_terminal_class(class),
+                "{class} is a terminal but is_terminal_class says it is not"
+            );
+        }
+    }
 }
