@@ -102,10 +102,42 @@ async fn main() -> Result<()> {
         overlay_enabled,
     });
 
+    let daemon_state = Arc::new(Mutex::new(DaemonState::new()));
+
+    // Shared command channel for in-process command sources (hotkeys, tray
+    // menu). One dispatch loop drains it and routes every command through
+    // `handle_command`, exactly like commands arriving over the IPC socket.
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(16);
+    {
+        let dispatch_state = Arc::clone(&daemon_state);
+        let dispatch_ctx = Arc::clone(&context);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                info!("internal command (hotkey/tray): {cmd:?}");
+                let _response =
+                    handle_command(cmd, Arc::clone(&dispatch_state), Arc::clone(&dispatch_ctx))
+                        .await;
+                // Broadcast state for tray.
+                let current = dispatch_state.lock().await.state_machine.state();
+                let _ = dispatch_ctx.state_tx.send(current);
+            }
+        });
+    }
+
     // Start system tray if enabled.
     // Spawned as a background task so retries don't block the IPC server.
     if tray_enabled {
-        tokio::spawn(whisrs::tray::spawn_tray(state_rx.clone()));
+        // Hand the tray the daemon's toast helper so menu failures (a failed
+        // "Restart Daemon" click) reach the user, not just the journal. Gated
+        // like every other error notification.
+        let tray_notify = context
+            .notify_error()
+            .then_some(send_notification as whisrs::tray::NotifyFn);
+        tokio::spawn(whisrs::tray::spawn_tray(
+            state_rx.clone(),
+            cmd_tx.clone(),
+            tray_notify,
+        ));
     }
 
     // Start bottom recording overlay if enabled.
@@ -133,8 +165,6 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&sock_path).context("failed to bind Unix socket")?;
     info!("listening on {}", sock_path.display());
 
-    let daemon_state = Arc::new(Mutex::new(DaemonState::new()));
-
     let sock_path_clone = sock_path.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
@@ -150,21 +180,10 @@ async fn main() -> Result<()> {
     if context.config.hotkeys.is_some() || !context.config.llm_commands.is_empty() {
         let hk_config = context.config.hotkeys.clone().unwrap_or_default();
         let llm_commands = context.config.llm_commands.clone();
-        let hk_state = Arc::clone(&daemon_state);
-        let hk_ctx = Arc::clone(&context);
+        let hk_tx = cmd_tx.clone();
         tokio::spawn(async move {
-            let (hotkey_tx, mut hotkey_rx) = tokio::sync::mpsc::channel::<Command>(16);
-            whisrs::hotkey::start_hotkey_listener(&hk_config, &llm_commands, hotkey_tx).await;
-
-            // Process hotkey commands.
-            while let Some(cmd) = hotkey_rx.recv().await {
-                info!("hotkey command: {cmd:?}");
-                let _response =
-                    handle_command(cmd, Arc::clone(&hk_state), Arc::clone(&hk_ctx)).await;
-                // Broadcast state for tray.
-                let current = hk_state.lock().await.state_machine.state();
-                let _ = hk_ctx.state_tx.send(current);
-            }
+            // Hotkey presses feed the shared dispatch loop above.
+            whisrs::hotkey::start_hotkey_listener(&hk_config, &llm_commands, hk_tx).await;
         });
     }
 

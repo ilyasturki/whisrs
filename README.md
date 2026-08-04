@@ -250,7 +250,7 @@ plain-toggle key is unaffected.
 
 ## Project Status
 
-whisrs is functional and usable for daily dictation. Streaming transcription, command mode, read-selection-aloud (TTS via Groq, OpenAI, Deepgram, or a local sidecar), multi-language support, system tray, OSD overlay, layout-aware injection (incl. AltGr + dead keys), the generic ASR sidecar backend (Moonshine, Parakeet, VibeVoice-ASR), and packaging for AUR / Nix / crates.io all ship today. Native local Vosk and Parakeet backends are next.
+whisrs is functional and usable for daily dictation. Streaming transcription, command mode, read-selection-aloud (TTS via Groq, OpenAI, Deepgram, or a local sidecar), multi-language support, system tray (left-click toggles recording; right-click menu shows status and offers restart and quit), OSD overlay, layout-aware injection (incl. AltGr + dead keys), the generic ASR sidecar backend (Moonshine, Parakeet, VibeVoice-ASR), and packaging for AUR / Nix / crates.io all ship today. Native local Vosk and Parakeet backends are next.
 
 Per-release details: [docs/version-roadmap.md](docs/version-roadmap.md).
 
