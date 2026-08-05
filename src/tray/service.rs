@@ -308,3 +308,37 @@ pub async fn spawn_tray(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Brings the `activate` trait method into scope for method-call syntax
+    // below; `impl ksni::Tray for WhisrsTray` above only qualifies the path,
+    // it doesn't import the trait.
+    use ksni::Tray as _;
+
+    /// `activate()` (left-click on the tray icon) is the only tray-driven
+    /// command, and nothing checks that it still sends `Toggle` after a
+    /// refactor — a typo'd variant here would ship silently. Pin it.
+    #[test]
+    fn activate_queues_toggle_command() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let mut tray = WhisrsTray {
+            state: TrayState {
+                current: State::Idle,
+            },
+            cmd_tx,
+            notify: None,
+        };
+
+        tray.activate(0, 0);
+
+        let cmd = cmd_rx
+            .try_recv()
+            .expect("activate() should queue a command");
+        assert!(
+            matches!(cmd, Command::Toggle { language: None }),
+            "expected Command::Toggle {{ language: None }}, got {cmd:?}"
+        );
+    }
+}
