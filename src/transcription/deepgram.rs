@@ -48,9 +48,37 @@ fn map_language(language: &str) -> &str {
     }
 }
 
+/// Percent-encode one query-string value.
+///
+/// The streaming URL below is assembled by hand and there is no encoder in the
+/// dependency tree, so this has to exist: Deepgram rejects the handshake with a
+/// bare 400 when a multi-word keyterm leaves a raw space in the URI.
+fn percent_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Whether `model` accepts the `keyterm` parameter.
+///
+/// Deepgram answers `400 INVALID_QUERY_PARAMETER` — "`keyterm` is only
+/// supported for Nova-3 and Flux" — on anything else, so a user who sets
+/// `vocabulary` while pinning an older model must not have every request
+/// rejected because of it.
+fn supports_keyterm(model: &str) -> bool {
+    model.starts_with("nova-3") || model.starts_with("flux")
+}
+
 /// Build common query parameters for Deepgram requests.
 fn build_query_params<'a>(
     config: &'a TranscriptionConfig,
+    keyterms: &'a [String],
     extra: &[(&'a str, &'a str)],
 ) -> Vec<(&'a str, &'a str)> {
     let mut params = vec![
@@ -58,6 +86,18 @@ fn build_query_params<'a>(
         ("language", map_language(&config.language)),
         ("smart_format", "true"),
     ];
+    // Keyterm prompting: one repeated `keyterm` per term. Deepgram rejects
+    // weights/intensifiers and comma- or semicolon-separated lists, and caps the
+    // set at 500 tokens per request.
+    if supports_keyterm(&config.model) {
+        params.extend(keyterms.iter().map(|t| ("keyterm", t.as_str())));
+    } else if !keyterms.is_empty() {
+        debug!(
+            "model {} does not support keyterm prompting — ignoring {} vocabulary term(s)",
+            config.model,
+            keyterms.len()
+        );
+    }
     params.extend_from_slice(extra);
     params
 }
@@ -122,13 +162,15 @@ struct StreamingChannel {
 pub struct DeepgramRestBackend {
     client: reqwest::Client,
     api_key: String,
+    keyterms: Vec<String>,
 }
 
 impl DeepgramRestBackend {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, keyterms: Vec<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key,
+            keyterms,
         }
     }
 }
@@ -153,7 +195,7 @@ impl TranscriptionBackend for DeepgramRestBackend {
             config.language
         );
 
-        let params = build_query_params(config, &[]);
+        let params = build_query_params(config, &self.keyterms, &[]);
 
         let response = self
             .client
@@ -219,11 +261,12 @@ impl TranscriptionBackend for DeepgramRestBackend {
 /// results to avoid duplicates.
 pub struct DeepgramStreamingBackend {
     api_key: String,
+    keyterms: Vec<String>,
 }
 
 impl DeepgramStreamingBackend {
-    pub fn new(api_key: String) -> Self {
-        Self { api_key }
+    pub fn new(api_key: String, keyterms: Vec<String>) -> Self {
+        Self { api_key, keyterms }
     }
 }
 
@@ -278,6 +321,7 @@ impl TranscriptionBackend for DeepgramStreamingBackend {
 
         let params = build_query_params(
             config,
+            &self.keyterms,
             &[
                 ("encoding", "linear16"),
                 ("sample_rate", "16000"),
@@ -289,7 +333,7 @@ impl TranscriptionBackend for DeepgramStreamingBackend {
         // Build the WebSocket URL with query parameters.
         let query_string: String = params
             .iter()
-            .map(|(k, v)| format!("{k}={v}"))
+            .map(|(k, v)| format!("{k}={}", percent_encode(v)))
             .collect::<Vec<_>>()
             .join("&");
         let url = format!("{DEEPGRAM_WS_URL}?{query_string}");
@@ -512,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn rest_rejects_empty_audio() {
-        let backend = DeepgramRestBackend::new("test-key".to_string());
+        let backend = DeepgramRestBackend::new("test-key".to_string(), Vec::new());
         let config = TranscriptionConfig {
             language: "en".to_string(),
             model: "nova-3".to_string(),
@@ -529,7 +573,7 @@ mod tests {
             model: "nova-3".to_string(),
             prompt: None,
         };
-        let params = build_query_params(&config, &[]);
+        let params = build_query_params(&config, &[], &[]);
         assert!(params
             .iter()
             .any(|(k, v)| *k == "smart_format" && *v == "true"));
@@ -544,9 +588,61 @@ mod tests {
             model: "nova-3".to_string(),
             prompt: None,
         };
-        let params = build_query_params(&config, &[]);
+        let params = build_query_params(&config, &[], &[]);
         assert!(params
             .iter()
             .any(|(k, v)| *k == "language" && *v == "multi"));
+    }
+
+    #[test]
+    fn build_query_params_emits_one_keyterm_per_vocabulary_entry() {
+        let config = TranscriptionConfig {
+            language: "auto".to_string(),
+            model: "nova-3".to_string(),
+            prompt: None,
+        };
+        let keyterms = vec!["whisrs".to_string(), "GNOME Shell".to_string()];
+        let params = build_query_params(&config, &keyterms, &[]);
+        let terms: Vec<&str> = params
+            .iter()
+            .filter(|(k, _)| *k == "keyterm")
+            .map(|(_, v)| *v)
+            .collect();
+        assert_eq!(terms, vec!["whisrs", "GNOME Shell"]);
+    }
+
+    #[test]
+    fn build_query_params_omits_keyterm_on_models_that_reject_it() {
+        // nova-2 answers 400 INVALID_QUERY_PARAMETER when `keyterm` is present,
+        // so a vocabulary set alongside an older model must be dropped rather
+        // than break every request.
+        let config = TranscriptionConfig {
+            language: "en".to_string(),
+            model: "nova-2".to_string(),
+            prompt: None,
+        };
+        let keyterms = vec!["whisrs".to_string()];
+        let params = build_query_params(&config, &keyterms, &[]);
+        assert!(!params.iter().any(|(k, _)| *k == "keyterm"));
+    }
+
+    #[test]
+    fn build_query_params_without_vocabulary_sends_no_keyterm() {
+        let config = TranscriptionConfig {
+            language: "en".to_string(),
+            model: "nova-3".to_string(),
+            prompt: None,
+        };
+        let params = build_query_params(&config, &[], &[]);
+        assert!(!params.iter().any(|(k, _)| *k == "keyterm"));
+    }
+
+    #[test]
+    fn percent_encode_escapes_spaces_and_leaves_plain_values_alone() {
+        // A raw space in a multi-word keyterm makes the streaming URI invalid
+        // and Deepgram answers the handshake with a bare 400.
+        assert_eq!(percent_encode("GNOME Shell"), "GNOME%20Shell");
+        assert_eq!(percent_encode("nova-3"), "nova-3");
+        assert_eq!(percent_encode("linear16"), "linear16");
     }
 }

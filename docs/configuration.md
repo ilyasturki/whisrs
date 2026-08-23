@@ -17,10 +17,12 @@ filler_words = []           # custom list (empty = use built-in defaults)
 audio_feedback = true       # play tones on record start/stop/done
 audio_feedback_volume = 0.5 # 0.0 to 1.0
 vocabulary = ["whisrs", "Hyprland"]  # custom terms for better transcription accuracy
+                            # (sent to Deepgram as keyterms on Nova-3/Flux, ignored on
+                            # older models; folded into the prompt hint elsewhere)
 prompt = "Speech is in English or Spanish. Transcribe in the language spoken; never translate."
                             # optional sentence-style context, prepended to vocabulary
                             # (passed to Groq, OpenAI REST/Realtime, and local whisper.cpp;
-                            # Deepgram does not accept a prompt)
+                            # Deepgram takes no prompt — use vocabulary there)
 tray = true                 # system tray icon (requires SNI host like waybar)
 overlay = false             # bottom-screen recording overlay (Hyprland/Sway, GNOME extension)
 

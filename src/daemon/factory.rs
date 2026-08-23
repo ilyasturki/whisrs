@@ -84,7 +84,10 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
                 warn!("no Deepgram API key configured");
             }
             info!("using Deepgram REST transcription backend");
-            Arc::new(DeepgramRestBackend::new(api_key))
+            Arc::new(DeepgramRestBackend::new(
+                api_key,
+                config.general.vocabulary.clone(),
+            ))
         }
         "deepgram-streaming" => {
             let api_key = resolve_deepgram_api_key(config).unwrap_or_default();
@@ -92,7 +95,10 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
                 warn!("no Deepgram API key configured");
             }
             info!("using Deepgram streaming transcription backend");
-            Arc::new(DeepgramStreamingBackend::new(api_key))
+            Arc::new(DeepgramStreamingBackend::new(
+                api_key,
+                config.general.vocabulary.clone(),
+            ))
         }
         "groq" => {
             let api_key = resolve_groq_api_key(config).unwrap_or_default();
