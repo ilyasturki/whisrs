@@ -19,6 +19,9 @@ audio_feedback_volume = 0.5 # 0.0 to 1.0
 vocabulary = ["whisrs", "Hyprland"]  # custom terms for better transcription accuracy
                             # (sent to Deepgram as keyterms on Nova-3/Flux, ignored on
                             # older models; folded into the prompt hint elsewhere)
+                            # very long lists are truncated for Deepgram, since every
+                            # keyterm rides in the request URI — the daemon warns at
+                            # startup naming how many terms actually reach it
 prompt = "Speech is in English or Spanish. Transcribe in the language spoken; never translate."
                             # optional sentence-style context, prepended to vocabulary
                             # (passed to Groq, OpenAI REST/Realtime, and local whisper.cpp;
