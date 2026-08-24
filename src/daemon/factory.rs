@@ -84,10 +84,7 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
                 warn!("no Deepgram API key configured");
             }
             info!("using Deepgram REST transcription backend");
-            Arc::new(DeepgramRestBackend::new(
-                api_key,
-                config.general.vocabulary.clone(),
-            ))
+            Arc::new(DeepgramRestBackend::new(api_key))
         }
         "deepgram-streaming" => {
             let api_key = resolve_deepgram_api_key(config).unwrap_or_default();
@@ -95,10 +92,7 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
                 warn!("no Deepgram API key configured");
             }
             info!("using Deepgram streaming transcription backend");
-            Arc::new(DeepgramStreamingBackend::new(
-                api_key,
-                config.general.vocabulary.clone(),
-            ))
+            Arc::new(DeepgramStreamingBackend::new(api_key))
         }
         "groq" => {
             let api_key = resolve_groq_api_key(config).unwrap_or_default();
@@ -231,11 +225,13 @@ pub(crate) fn create_backend(config: &Config) -> Arc<dyn TranscriptionBackend> {
 
 pub(crate) fn get_model_for_backend(config: &Config) -> String {
     match config.general.backend.as_str() {
-        "deepgram" | "deepgram-streaming" => config
-            .deepgram
-            .as_ref()
-            .map(|d| d.model.clone())
-            .unwrap_or_else(|| "nova-3".to_string()),
+        // Not a local literal: `Config::deepgram_model` is the same function
+        // `Config::validate`'s keyterm gate inspects, so the model warned about
+        // at load is the model that goes on the wire. A separate copy here was
+        // unpinned — flipping it to "nova-2" left all 498 tests green, which
+        // would have meant `validate` staying silent while every keyterm
+        // request 400'd.
+        "deepgram" | "deepgram-streaming" => config.deepgram_model(),
         "groq" => config
             .groq
             .as_ref()
@@ -312,5 +308,27 @@ mod tests {
         };
 
         assert_eq!(get_model_for_backend(&config), "Whisper-Tiny");
+    }
+
+    #[test]
+    fn deepgram_model_on_the_wire_is_the_one_validate_gates_on() {
+        // `[deepgram]` is optional, and with the section absent this factory
+        // used to fall back to its own `"nova-3"` literal while
+        // `Config::validate`'s keyterm gate consulted
+        // `Config::deepgram_model`. Two independent strings, neither pinned:
+        // flipping the one here to "nova-2" left the whole suite green, and
+        // would have meant `validate` staying silent about a vocabulary while
+        // every request 400'd on an unsupported `keyterm` parameter.
+        let mut config: Config = toml::from_str("").expect("empty config uses defaults");
+        config.deepgram = None;
+
+        for backend in ["deepgram", "deepgram-streaming"] {
+            config.general.backend = backend.to_string();
+            assert_eq!(
+                get_model_for_backend(&config),
+                config.deepgram_model(),
+                "{backend}: the wire model and the model validate inspects disagree"
+            );
+        }
     }
 }

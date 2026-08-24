@@ -432,6 +432,7 @@ mod tests {
             language: "en".to_string(),
             model: "whisper-large-v3-turbo".to_string(),
             prompt: None,
+            keyterms: Vec::new(),
         };
         let err = backend.transcribe(&[], &config).await.unwrap_err();
         assert!(err.to_string().contains("empty audio"));
@@ -444,6 +445,7 @@ mod tests {
             language: "en".to_string(),
             model: "whisper-large-v3-turbo".to_string(),
             prompt: None,
+            keyterms: Vec::new(),
         };
         let huge = vec![0u8; MAX_FILE_SIZE + 1];
         let err = backend.transcribe(&huge, &config).await.unwrap_err();

@@ -324,7 +324,7 @@ pub(crate) fn configure_backend(
             let model = existing
                 .and_then(|c| c.deepgram.as_ref())
                 .map(|d| d.model.clone())
-                .unwrap_or_else(|| "nova-3".to_string());
+                .unwrap_or_else(crate::config::types::default_deepgram_model);
             Ok(BackendConfigSelection {
                 deepgram: Some(DeepgramConfig { api_key, model }),
                 ..BackendConfigSelection::default()

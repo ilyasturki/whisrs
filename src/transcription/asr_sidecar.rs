@@ -142,6 +142,7 @@ mod tests {
             language: "en".to_string(),
             model: "test-asr-model".to_string(),
             prompt: None,
+            keyterms: Vec::new(),
         };
         let err = backend.transcribe(&[], &config).await.unwrap_err();
         assert!(err.to_string().contains("empty audio"));
@@ -154,6 +155,7 @@ mod tests {
             language: "en".to_string(),
             model: "test-asr-model".to_string(),
             prompt: None,
+            keyterms: Vec::new(),
         };
         let err = backend.transcribe(&[1, 2, 3], &config).await.unwrap_err();
         assert!(err.to_string().contains("sidecar URL"));

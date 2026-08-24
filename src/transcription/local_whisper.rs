@@ -490,6 +490,7 @@ mod tests {
             language: "en".to_string(),
             model: "base.en".to_string(),
             prompt: None,
+            keyterms: Vec::new(),
         };
         let err = backend.transcribe(&[1, 2, 3], &config).await.unwrap_err();
         let msg = err.to_string();

@@ -628,15 +628,7 @@ pub(crate) async fn transcribe_batch_audio(
     let wav_data = encode_wav(samples)?;
     info!("encoded WAV: {} bytes", wav_data.len());
 
-    let config = if opts.use_prompt {
-        build_transcription_config(&context.config, language)
-    } else {
-        TranscriptionConfig {
-            language: language.to_string(),
-            model: get_model_for_backend(&context.config),
-            prompt: None,
-        }
-    };
+    let config = batch_transcription_config(&context.config, language, opts.use_prompt);
 
     let text = match context
         .transcription_backend
@@ -1019,6 +1011,31 @@ pub(crate) fn build_transcription_config(config: &Config, language: &str) -> Tra
         language: language.to_string(),
         model: get_model_for_backend(config),
         prompt: transcription_prompt(config.general.prompt.as_deref(), &config.general.vocabulary),
+        keyterms: config.general.vocabulary.clone(),
+    }
+}
+
+/// Pick the [`TranscriptionConfig`] for one batch run.
+///
+/// `use_prompt = false` is the command-mode opt-out: the recording is a spoken
+/// instruction, not content, so it gets neither the prompt hint nor the
+/// vocabulary keyterms. `keyterms: Vec::new()` is the same opt-out as
+/// `prompt: None` — biasing "make this shorter" toward the dictation
+/// vocabulary is wrong for exactly the reason the prompt is withheld.
+fn batch_transcription_config(
+    config: &Config,
+    language: &str,
+    use_prompt: bool,
+) -> TranscriptionConfig {
+    if use_prompt {
+        build_transcription_config(config, language)
+    } else {
+        TranscriptionConfig {
+            language: language.to_string(),
+            model: get_model_for_backend(config),
+            prompt: None,
+            keyterms: Vec::new(),
+        }
     }
 }
 
@@ -1120,6 +1137,40 @@ mod tests {
     #[test]
     fn transcription_prompt_empty_string_with_empty_vocab_is_none() {
         assert_eq!(transcription_prompt(Some(""), &[]), None);
+    }
+
+    /// A default config with the given vocabulary, for the keyterm routing
+    /// tests. Every `Config` field is `#[serde(default)]`, so an empty
+    /// document deserializes to the defaults.
+    fn config_with_vocabulary(vocabulary: &[&str]) -> Config {
+        let mut config: Config = toml::from_str("").expect("empty config uses defaults");
+        config.general.vocabulary = vocabulary.iter().map(|t| t.to_string()).collect();
+        config
+    }
+
+    #[test]
+    fn dictation_batch_config_carries_vocabulary_as_keyterms() {
+        let config = config_with_vocabulary(&["whisrs", "Hyprland"]);
+        let built = batch_transcription_config(&config, "en", BatchOptions::dictation().use_prompt);
+        assert_eq!(built.keyterms, vec!["whisrs", "Hyprland"]);
+        assert!(built.prompt.is_some());
+    }
+
+    #[test]
+    fn command_mode_batch_config_sends_no_keyterms() {
+        // Regression guard: keyterms must ride the same opt-out as `prompt`.
+        // A spoken instruction is not content, so biasing it toward the
+        // dictation vocabulary is wrong for the same reason the prompt is
+        // withheld — see `BatchOptions::command_mode`.
+        let config = config_with_vocabulary(&["whisrs", "Hyprland"]);
+        let built =
+            batch_transcription_config(&config, "en", BatchOptions::command_mode().use_prompt);
+        assert!(
+            built.keyterms.is_empty(),
+            "command mode leaked the dictation vocabulary: {:?}",
+            built.keyterms
+        );
+        assert!(built.prompt.is_none());
     }
 
     #[test]

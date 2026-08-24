@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::hotkey;
 use crate::llm;
+use crate::transcription::deepgram;
 use crate::transcription::openai_realtime_protocol::{OpenAiRealtimeProfile, TurnDetectionMode};
 use crate::WhisrsError;
 
@@ -588,7 +589,12 @@ fn default_llm_instruction() -> String {
 fn default_key_delay_ms() -> u64 {
     2
 }
-fn default_deepgram_model() -> String {
+/// The `[deepgram] model` a config gets when the section omits it.
+///
+/// `pub(crate)` so `whisrs setup` writes this rather than its own copy of the
+/// string. It is the single source for the default: [`Config::deepgram_model`]
+/// routes through it, and the daemon's model resolution routes through that.
+pub(crate) fn default_deepgram_model() -> String {
     "nova-3".to_string()
 }
 fn default_groq_model() -> String {
@@ -1030,6 +1036,8 @@ impl Config {
             });
         }
 
+        warnings.extend(self.deepgram_keyterm_warnings(backend));
+
         // Streaming backends (including local-whisper, which always streams
         // regardless of its `segmentation` mode) type dictated text
         // incrementally as it arrives and never go through the
@@ -1297,6 +1305,96 @@ impl Config {
         }
 
         Ok(warnings)
+    }
+
+    /// The Deepgram model this config will actually transcribe with.
+    ///
+    /// `[deepgram]` is an optional section: a config that names the backend but
+    /// omits the section still gets the section's own serde default. Resolving
+    /// through [`default_deepgram_model`] rather than repeating the string
+    /// keeps the keyterm gate below in step with that default — a literal copy
+    /// rots silently the day the default moves.
+    ///
+    /// `pub`, not private, because the model that actually goes on the wire is
+    /// resolved by the daemon's `get_model_for_backend`, and the daemon is a
+    /// separate binary crate. It used to carry its own `"nova-3"` literal, and
+    /// that literal was unpinned: flipping it to `"nova-2"` left the whole test
+    /// suite green while every request would have 400'd with `validate` silent,
+    /// because the gate here inspected a different string than the wire used.
+    /// One function, one answer.
+    pub fn deepgram_model(&self) -> String {
+        self.deepgram
+            .as_ref()
+            .map(|d| d.model.clone())
+            .unwrap_or_else(default_deepgram_model)
+    }
+
+    /// Load-time warnings about `[general] vocabulary` reaching Deepgram.
+    ///
+    /// The vocabulary rides to Deepgram as repeated `keyterm` query params, and
+    /// both ways it can fail to arrive are invisible at run time: the backend
+    /// logs the drop at `debug!`, which the daemon's default `info` filter
+    /// hides. Say it once at load instead, the same way the GNOME/KDE
+    /// window-tracker gap is reported.
+    ///
+    /// The `backend` gate is load-bearing, not decoration. `whisrs setup`
+    /// writes a `[deepgram]` section, and people leave it behind when they
+    /// switch backends — without the gate a `backend = "groq"` user with a
+    /// stale `[deepgram] model = "nova-2"` and any vocabulary at all gets a
+    /// bogus "vocabulary is ignored" warning on every daemon start, about a
+    /// backend they are not using.
+    fn deepgram_keyterm_warnings(&self, backend: &str) -> Vec<ConfigWarning> {
+        let mut warnings = Vec::new();
+        if !matches!(backend, "deepgram" | "deepgram-streaming") {
+            return warnings;
+        }
+
+        // Blank entries are not terms, so a vocabulary of nothing but blanks
+        // has nothing to warn about.
+        let usable = deepgram::usable_keyterms(&self.general.vocabulary).count();
+        if usable == 0 {
+            return warnings;
+        }
+
+        let model = self.deepgram_model();
+        if !deepgram::supports_keyterm(&model) {
+            warnings.push(ConfigWarning {
+                message: format!(
+                    "[general] vocabulary is ignored with [deepgram] model = \"{model}\": \
+                     keyterm prompting is a Nova-3/Flux feature and Deepgram rejects the \
+                     parameter on older models, so the {usable} term(s) are dropped from every \
+                     request. Switch to a nova-3 model to bias transcription toward them."
+                ),
+            });
+            return warnings;
+        }
+
+        // One list, one count: `effective_keyterms` is the same function the
+        // request builder slices with, so the number named here is the number
+        // that goes on the wire.
+        //
+        // "N of M", not "the first N": `effective_keyterms` skips a term that
+        // does not fit and keeps going, so the surviving terms are not a prefix
+        // of the list.
+        let effective = deepgram::effective_keyterms(&self.general.vocabulary).len();
+        if effective < usable {
+            warnings.push(ConfigWarning {
+                message: format!(
+                    "[general] vocabulary: {effective} of {usable} usable term(s) reach \
+                     Deepgram. Keyterms are capped at {} bytes of query string, {} terms and \
+                     {} words per request, because every term rides in the request URI: an \
+                     oversized URI is rejected by the edge as a bare 400 that never mentions \
+                     the vocabulary, and Deepgram's own 500-token keyterm cap is answered the \
+                     same way. Terms that do not fit are skipped individually, so the ones \
+                     that arrive are not necessarily the first ones. Trim the list to keep it \
+                     predictable.",
+                    deepgram::KEYTERM_QUERY_BUDGET_BYTES,
+                    deepgram::KEYTERM_MAX_TERMS,
+                    deepgram::KEYTERM_MAX_WORDS
+                ),
+            });
+        }
+        warnings
     }
 
     /// Check if any transcription backend has an API key configured.
@@ -2038,6 +2136,218 @@ mod tests {
 
         assert!(config.validate().is_ok());
         assert!(config.asr_sidecar.is_some());
+    }
+
+    /// A deepgram config on `model` with the given vocabulary terms.
+    fn deepgram_config_with_vocabulary(model: &str, vocabulary: &[String]) -> Config {
+        let mut config: Config = toml::from_str("").expect("empty config uses defaults");
+        config.general.backend = "deepgram".to_string();
+        config.general.vocabulary = vocabulary.to_vec();
+        config.deepgram = Some(DeepgramConfig {
+            api_key: "test-key".to_string(),
+            model: model.to_string(),
+        });
+        config
+    }
+
+    #[test]
+    fn config_validate_warns_vocabulary_ignored_on_pre_nova3_deepgram_model() {
+        // The backend drops the terms at `debug!`, which the daemon's default
+        // `info` filter hides — so this has to be said once at load.
+        let vocabulary = vec!["whisrs".to_string(), "Hyprland".to_string()];
+        let config = deepgram_config_with_vocabulary("nova-2", &vocabulary);
+        let warnings = config.validate().unwrap();
+        let warning = warnings
+            .iter()
+            .find(|w| w.message.contains("vocabulary"))
+            .unwrap_or_else(|| panic!("nova-2 + vocabulary must warn: {warnings:?}"));
+        assert!(
+            warning.message.contains("nova-2"),
+            "the warning must name the model: {}",
+            warning.message
+        );
+        assert!(
+            warning.message.contains("ignored") || warning.message.contains("dropped"),
+            "the warning must say the terms do not reach Deepgram: {}",
+            warning.message
+        );
+    }
+
+    #[test]
+    fn config_validate_does_not_warn_about_vocabulary_on_nova3() {
+        let vocabulary = vec!["whisrs".to_string()];
+        let config = deepgram_config_with_vocabulary("nova-3", &vocabulary);
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings.iter().all(|w| !w.message.contains("vocabulary")),
+            "nova-3 supports keyterm; nothing to warn about: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn config_validate_does_not_warn_without_vocabulary() {
+        let config = deepgram_config_with_vocabulary("nova-2", &[]);
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings.iter().all(|w| !w.message.contains("vocabulary")),
+            "no vocabulary means nothing is being dropped: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn config_validate_warns_when_vocabulary_exceeds_the_keyterm_budget() {
+        // An unbounded vocabulary builds an oversized request URI and
+        // Deepgram's edge answers a bare 400 that never mentions it.
+        let vocabulary: Vec<String> = (0..1000).map(|i| format!("term{i:04}")).collect();
+        let config = deepgram_config_with_vocabulary("nova-3", &vocabulary);
+        let warnings = config.validate().unwrap();
+        let warning = warnings
+            .iter()
+            .find(|w| w.message.contains("vocabulary"))
+            .unwrap_or_else(|| panic!("an oversized vocabulary must warn: {warnings:?}"));
+        let fitting = deepgram::effective_keyterms(&vocabulary).len();
+        assert!(
+            warning.message.contains(&format!(
+                "{fitting} of {} usable term(s) reach",
+                vocabulary.len()
+            )),
+            "the warning must name how many terms are actually sent ({fitting}): {}",
+            warning.message
+        );
+        // All three limits, spelled with their units — a bare `contains("200")`
+        // would be satisfied by the term count itself.
+        assert!(
+            warning.message.contains(&format!(
+                "{} bytes of query string",
+                deepgram::KEYTERM_QUERY_BUDGET_BYTES
+            )),
+            "the warning must name the byte budget: {}",
+            warning.message
+        );
+        assert!(
+            warning
+                .message
+                .contains(&format!("{} terms and", deepgram::KEYTERM_MAX_TERMS)),
+            "the warning must name the term cap: {}",
+            warning.message
+        );
+        assert!(
+            warning.message.contains(&format!(
+                "{} words per request",
+                deepgram::KEYTERM_MAX_WORDS
+            )),
+            "the warning must name the word cap: {}",
+            warning.message
+        );
+    }
+
+    /// The term count `Config::validate` advertises, parsed back out of its
+    /// warning text.
+    ///
+    /// The whole point of the warning is that the number it names is the number
+    /// of `keyterm` params the request carries. Reading it back out of the
+    /// message is what lets a test compare the two, rather than compare
+    /// `effective_keyterms` against itself.
+    fn advertised_keyterm_count(warnings: &[ConfigWarning]) -> Option<usize> {
+        let message = &warnings
+            .iter()
+            .find(|w| w.message.starts_with("[general] vocabulary: "))?
+            .message;
+        message
+            .trim_start_matches("[general] vocabulary: ")
+            .split(' ')
+            .next()?
+            .parse()
+            .ok()
+    }
+
+    #[test]
+    fn config_validate_advertises_the_count_that_goes_on_the_wire() {
+        // The no-drift invariant, in every shape that trips a different limit.
+        // This broke once already: blanks were charged against the byte budget
+        // and filtered afterwards, so `validate` promised 335 while the request
+        // carried 135.
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            // Byte-budget-bound: 1000 short single-word terms.
+            (
+                "byte budget",
+                (0..1000).map(|i| format!("term{i:04}")).collect(),
+            ),
+            // Term-cap-bound: terms short enough that 200 of them use barely
+            // half the byte budget.
+            ("term cap", (0..500).map(|i| format!("t{i:03}")).collect()),
+            // Word-cap-bound: three words each, so 300 words arrives at 100
+            // terms, well before the byte budget's 195.
+            ("word cap", vec!["ab cd ef".to_string(); 400]),
+            // Blanks interleaved: blanks are not terms and must cost nothing.
+            (
+                "blanks interleaved",
+                (0..1000)
+                    .flat_map(|i| ["   ".to_string(), format!("term{i:04}")])
+                    .collect(),
+            ),
+            // One oversized term first: it must be skipped, not fatal.
+            (
+                "long term first",
+                vec![
+                    "x".repeat(5000),
+                    "whisrs".to_string(),
+                    "Hyprland".to_string(),
+                ],
+            ),
+        ];
+
+        for (label, vocabulary) in cases {
+            let config = deepgram_config_with_vocabulary("nova-3", &vocabulary);
+            let warnings = config.validate().expect("a keyed deepgram config is valid");
+            let advertised = advertised_keyterm_count(&warnings).unwrap_or_else(|| {
+                panic!("{label}: a truncated vocabulary must warn: {warnings:?}")
+            });
+            let on_wire = deepgram::effective_keyterms(&config.general.vocabulary).len();
+            assert_eq!(
+                advertised, on_wire,
+                "{label}: validate advertised {advertised} but the request carries {on_wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_validate_does_not_warn_about_deepgram_vocabulary_on_another_backend() {
+        // `whisrs setup` writes a [deepgram] section, and people leave it
+        // behind when they switch backends. Without the backend gate, this
+        // groq user gets a "vocabulary is ignored" warning on every daemon
+        // start about a backend they are not using.
+        let mut config = deepgram_config_with_vocabulary(
+            "nova-2",
+            &["whisrs".to_string(), "Hyprland".to_string()],
+        );
+        config.general.backend = "groq".to_string();
+        config.groq = Some(GroqConfig {
+            api_key: "test-key".to_string(),
+            model: default_groq_model(),
+        });
+        let warnings = config.validate().unwrap();
+        assert!(
+            warnings.iter().all(|w| !w.message.contains("vocabulary")),
+            "a stale [deepgram] section must not warn on another backend: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn deepgram_keyterm_warnings_without_a_deepgram_section_use_the_default_model() {
+        // `[deepgram]` is optional; the section's serde default (nova-3)
+        // supports keyterm, so an absent section must not produce the
+        // "vocabulary is ignored" warning. Goes through the warning builder
+        // rather than `validate` because `validate` rejects a deepgram backend
+        // with no section and no `WHISRS_DEEPGRAM_API_KEY` before it gets here.
+        let mut config = deepgram_config_with_vocabulary("nova-3", &["whisrs".to_string()]);
+        config.deepgram = None;
+        assert_eq!(config.deepgram_model(), default_deepgram_model());
+        let warnings = config.deepgram_keyterm_warnings("deepgram");
+        assert!(
+            warnings.is_empty(),
+            "the default model supports keyterm; nothing to warn about: {warnings:?}"
+        );
     }
 
     #[test]

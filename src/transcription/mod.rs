@@ -50,6 +50,15 @@ pub struct TranscriptionConfig {
     pub model: String,
     /// Optional prompt hint for the transcription model (vocabulary, context).
     pub prompt: Option<String>,
+    /// Backend-specific keyword-biasing terms — Deepgram keyterm prompting.
+    ///
+    /// Carried alongside `prompt` rather than on the backend struct so both
+    /// forms of "bias the model toward these words" travel the same channel:
+    /// a path that deliberately sends no prompt (command mode, where the
+    /// recording is a spoken instruction rather than content) sends no
+    /// keyterms either. Backends with no equivalent parameter ignore these —
+    /// they receive the same terms folded into `prompt`.
+    pub keyterms: Vec<String>,
 }
 
 /// Trait for transcription backends.

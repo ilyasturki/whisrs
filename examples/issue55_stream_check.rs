@@ -239,6 +239,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         language: "en".to_string(),
         model: "base.en".to_string(),
         prompt: None,
+        keyterms: Vec::new(),
     };
 
     let (audio_tx, audio_rx) = mpsc::channel::<Vec<i16>>(256);
