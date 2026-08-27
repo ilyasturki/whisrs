@@ -28,6 +28,38 @@ pub(crate) async fn cleanup_stale_socket(path: &std::path::Path) -> Result<()> {
 /// Returns (Config, Option<warning_message>) — the warning is set when config
 /// parsing fails and defaults are used, so the caller can notify the user.
 pub(crate) fn load_config() -> (Config, Option<String>) {
+    let (mut config, warning) = load_config_toml();
+    merge_vocabulary_file(&mut config);
+    (config, warning)
+}
+
+/// Must run before `validate_config`, so the keyterm limits count the terms
+/// the backends actually receive.
+fn merge_vocabulary_file(config: &mut Config) {
+    use whisrs::config::vocabulary::{load_vocabulary_file, merge_vocabulary, vocabulary_path};
+
+    let path = vocabulary_path();
+    match load_vocabulary_file(&path) {
+        Ok(Some(terms)) if !terms.is_empty() => {
+            let file_count = terms.len();
+            let merged = merge_vocabulary(std::mem::take(&mut config.general.vocabulary), terms);
+            info!(
+                "vocabulary: {file_count} term(s) from {}, {} effective after merging \
+                 with config.toml",
+                path.display(),
+                merged.len()
+            );
+            config.general.vocabulary = merged;
+        }
+        Ok(_) => {}
+        Err(e) => warn!(
+            "failed to read vocabulary file at {}: {e} — ignoring it",
+            path.display()
+        ),
+    }
+}
+
+fn load_config_toml() -> (Config, Option<String>) {
     let config_path = whisrs::config_path();
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {

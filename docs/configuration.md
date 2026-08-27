@@ -22,6 +22,8 @@ vocabulary = ["whisrs", "Hyprland"]  # custom terms for better transcription acc
                             # very long lists are truncated for Deepgram, since every
                             # keyterm rides in the request URI — the daemon warns at
                             # startup naming how many terms actually reach it
+                            # more terms can come from an optional vocabulary.txt next
+                            # to this file — see "The vocabulary file" below
 prompt = "Speech is in English or Spanish. Transcribe in the language spoken; never translate."
                             # optional sentence-style context, prepended to vocabulary
                             # (passed to Groq, OpenAI REST/Realtime, and local whisper.cpp;
@@ -409,6 +411,35 @@ Terminal detection needs the compositor to report the focused window class,
 which today means Hyprland, Niri, Sway and X11. On KDE and GNOME a terminal is
 treated as an ordinary target, so a multi-line reply is typed there. Add any
 class the built-in list misses to `[input] terminal_classes`.
+
+## The vocabulary file
+
+Vocabulary terms can also live in `~/.config/whisrs/vocabulary.txt`, next to
+`config.toml`. This exists for setups where `config.toml` is generated and
+read-only (Nix, chezmoi, any templated dotfiles), where adding one proper noun
+to `[general] vocabulary` would otherwise mean a rebuild. The path is fixed —
+there is deliberately no config key naming it, since setting one would need
+the very `config.toml` edit the file avoids.
+
+```
+# One term per line. Blank lines and lines starting with # are skipped.
+whisrs
+Claude Code
+NixOS
+```
+
+At daemon startup the file is merged into `[general] vocabulary` — config.toml's
+terms first, then the file's, duplicates dropped — before the config is
+validated, so the Deepgram keyterm limits and their startup warnings count the
+real list. A missing file is simply ignored; the feature is opt-in by creating
+it. Like the rest of the config, the file is read once at startup, so run
+`whisrs restart` after editing it.
+
+When the file exists, the `whisrs config` vocabulary editor shows the merged
+list and writes it back to `vocabulary.txt` on save (config.toml is then saved
+with an empty `vocabulary`, so no term is stored twice). The rewrite drops any
+comment lines you added by hand. Only `vocabulary` gets this treatment —
+`prompt` and everything else stay in `config.toml`.
 
 ## Environment variables
 

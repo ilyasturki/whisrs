@@ -13,7 +13,7 @@ use std::fs;
 use anyhow::{Context, Result};
 use dialoguer::{Confirm, Editor, Input, Select};
 
-use crate::config::setup;
+use crate::config::{setup, vocabulary};
 use crate::service::ServiceManager;
 use crate::{Config, HotkeyConfig, RestartOutcome};
 
@@ -34,6 +34,24 @@ pub fn run_config_menu() -> Result<()> {
                  Run {BOLD}whisrs setup{RESET} for the full onboarding flow."
             );
             (default_config(), true)
+        }
+    };
+
+    let vocab_path = vocabulary::vocabulary_path();
+    let use_vocab_file = match vocabulary::load_vocabulary_file(&vocab_path) {
+        Ok(Some(terms)) => {
+            config.general.vocabulary =
+                vocabulary::merge_vocabulary(std::mem::take(&mut config.general.vocabulary), terms);
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            println!(
+                "  {YELLOW}Could not read {}: {e} — its terms are not shown and \
+                 vocabulary edits stay in config.toml.{RESET}",
+                vocab_path.display()
+            );
+            false
         }
     };
 
@@ -78,7 +96,7 @@ pub fn run_config_menu() -> Result<()> {
             1 => edit_language(&mut config)?,
             2 => edit_behavior(&mut config)?,
             3 => edit_filler_words(&mut config)?,
-            4 => edit_vocabulary_and_prompt(&mut config)?,
+            4 => edit_vocabulary_and_prompt(&mut config, use_vocab_file)?,
             5 => edit_audio_device(&mut config)?,
             6 => edit_key_delay(&mut config)?,
             7 => edit_clipboard_fallback(&mut config)?,
@@ -101,7 +119,7 @@ pub fn run_config_menu() -> Result<()> {
                 // separator — no-op
             }
             17 => {
-                if save_and_restart(&config, fresh)? {
+                if save_and_restart(&config, fresh, use_vocab_file)? {
                     return Ok(());
                 }
                 // Validation failed — fall through to next loop iteration,
@@ -326,9 +344,15 @@ fn edit_filler_words(config: &mut Config) -> Result<()> {
     Ok(())
 }
 
-fn edit_vocabulary_and_prompt(config: &mut Config) -> Result<()> {
+fn edit_vocabulary_and_prompt(config: &mut Config, use_vocab_file: bool) -> Result<()> {
     println!("\n  {BOLD}Vocabulary & prompt{RESET}");
     println!("  {DIM}Domain terms/names sent as a hint to the backend to improve accuracy.{RESET}");
+    if use_vocab_file {
+        println!(
+            "  {DIM}Includes the terms from vocabulary.txt — on save the whole list is \
+             written back there.{RESET}"
+        );
+    }
 
     let current = if config.general.vocabulary.is_empty() {
         "(empty)".to_string()
@@ -848,7 +872,10 @@ fn open_in_editor(config: &mut Config) -> Result<bool> {
 /// `fresh` is true when we created the config from defaults (no file on disk
 /// at startup) — in that case we point the user at `whisrs setup` for the
 /// permissions/systemd/keybinding bits we deliberately skipped.
-fn save_and_restart(config: &Config, fresh: bool) -> Result<bool> {
+///
+/// With `use_vocab_file`, config.toml is written with an empty `vocabulary`
+/// so no term is stored twice and a deletion cannot resurrect from it.
+fn save_and_restart(config: &Config, fresh: bool, use_vocab_file: bool) -> Result<bool> {
     match config.validate() {
         Ok(warnings) => {
             for w in warnings {
@@ -865,7 +892,16 @@ fn save_and_restart(config: &Config, fresh: bool) -> Result<bool> {
         }
     }
 
-    let path = setup::write_config(config).context("failed to write config")?;
+    let mut on_disk = config.clone();
+    if use_vocab_file {
+        let vocab_path = vocabulary::vocabulary_path();
+        vocabulary::write_vocabulary_file(&vocab_path, &config.general.vocabulary)
+            .with_context(|| format!("failed to write {}", vocab_path.display()))?;
+        println!("\n  {GREEN}Wrote {}{RESET}", vocab_path.display());
+        on_disk.general.vocabulary = Vec::new();
+    }
+
+    let path = setup::write_config(&on_disk).context("failed to write config")?;
     println!("\n  {GREEN}Wrote {}{RESET}", path.display());
 
     // Permissions are set to 0600 by write_config(); double-check for the
